@@ -77,6 +77,15 @@ def _build_llm(config: dict[str, Any]):
             kwargs["api_key"] = access_key
             kwargs["api_secret"] = secret_key
         return aws.LLM(**kwargs)
+
+    if provider == "openai":
+        openai_plugin = _openai_plugin()
+        kwargs = {
+            "model": config["model"],
+            "base_url": os.getenv("OPENAI_BASE_URL"),
+            "api_key": os.getenv("OPENAI_API_KEY"),
+        }
+        return openai_plugin.LLM(**kwargs)
     raise ProviderAdapterError(f"unsupported LLM provider: {provider}")
 
 
