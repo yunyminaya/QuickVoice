@@ -1,0 +1,25 @@
+# LiveKit Server self-hosted — despliegue local
+# Integrado en QuickVoice: infraestructura de telefonía gratuita
+# ------------------------------------------------------------------
+# GENERA TUS CLAVES ANTES DE ARRANCAR:
+#   openssl rand -hex 16   (API key)
+#   openssl rand -hex 32   (API secret)
+#
+# Copia este archivo a config.yaml y pon tus claves en keys:
+#
+# keys:
+#   TU_API_KEY: TU_API_SECRET
+
+port: 7880
+rtc:
+  tcp_port: 7881
+  port_range_start: 50000
+  port_range_end: 50100
+redis:
+  address: 127.0.0.1:6379
+keys:
+  # API_KEY: API_SECRET  <-- reemplaza con tus claves generadas
+logging:
+  level: info
+room:
+  auto_create: true

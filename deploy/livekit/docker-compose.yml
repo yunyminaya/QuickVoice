@@ -1,0 +1,24 @@
+# LiveKit self-hosted — Docker Compose para QuickVoice
+# -----------------------------------------------------
+# Uso:
+#   1. Genera claves:  openssl rand -hex 16  y  openssl rand -hex 32
+#   2. Copia config.example.yaml → config.yaml y pon tus claves en keys:
+#   3. docker compose up -d
+#   4. Configura en apps/server/.env:
+#        LIVEKIT_URL=ws://TU_SERVIDOR:7880
+#        LIVEKIT_API_KEY=TU_API_KEY
+#        LIVEKIT_API_SECRET=TU_API_SECRET
+
+services:
+  livekit:
+    image: livekit/livekit-server:latest
+    container_name: livekit
+    restart: always
+    network_mode: host
+    volumes:
+      - ./config.yaml:/etc/livekit.yaml:ro
+    command: --config /etc/livekit.yaml
+    logging:
+      options:
+        max-size: "10m"
+        max-file: "3"
