@@ -1,3 +1,4 @@
 # Secretos de LiveKit — NUNCA subir
 config.yaml
+sip-config.yaml
 .env

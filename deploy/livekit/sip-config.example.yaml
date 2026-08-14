@@ -1,0 +1,13 @@
+# LiveKit SIP service — configuración de ejemplo
+# Copia a sip-config.yaml y pon tus claves reales (NUNCA subir sip-config.yaml)
+# ---------------------------------------------------------------
+# Este servicio conecta la telefonía (Twilio/Telnyx) con LiveKit:
+#   Twilio → SIP (puerto 5060) → LiveKit → QuickVoice agent
+
+log_level: info
+livekit_server_url: ws://127.0.0.1:7880
+api_key: TU_API_KEY
+api_secret: TU_API_SECRET
+sip_port: 5060
+redis:
+  address: 127.0.0.1:6379
