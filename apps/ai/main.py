@@ -387,6 +387,7 @@ class Assistant(Agent):
         self._call_context = call_context
         self._metadata_collector = CallMetadataCollector(config)
         self._transcript_collector = transcript_collector
+        self._user_turn_times: list[float] = []
 
     def _rag_enabled(self) -> bool:
         return bool(self._config.get("use_rag"))
@@ -399,6 +400,10 @@ class Assistant(Agent):
         )
 
     async def on_user_turn_completed(self, turn_ctx, new_message) -> None:
+        try:
+            self._user_turn_times.append(time.monotonic())
+        except Exception:
+            pass
         if not self._rag_enabled():
             return
 
@@ -892,6 +897,55 @@ async def entrypoint(ctx: JobContext):
                 logger.info("[QVDIAG] scheduler resumed after first message")
 
         asyncio.create_task(resume_after_first_message())
+
+    # WATCHDOG de cierre: silencio del cliente + duracion maxima (determinista, no depende del LLM)
+    async def call_watchdog(session, agent, config, ctx):
+        silence_s = float(config.get("silence_end_call_timeout_seconds") or 20)
+        max_s = float(config.get("max_conversation_duration_seconds") or 300)
+        started = time.monotonic()
+        try:
+            while True:
+                await asyncio.sleep(2)
+                now = time.monotonic()
+                elapsed = now - started
+                if elapsed > max_s:
+                    logger.warning("[WATCHDOG] duracion maxima alcanzada, cerrando llamada")
+                    await _hard_hangup(ctx, session, "duracion_maxima")
+                    return
+                # Si el agente esta generando o hablando (scheduler pausado),
+                # NO se cuenta silencio: la respuesta esta en camino.
+                activity = getattr(session, "_activity", None)
+                if activity is not None and getattr(activity, "scheduling_paused", False):
+                    continue
+                if elapsed > 20:
+                    turns = getattr(agent, "_user_turn_times", None) or []
+                    last = turns[-1] if turns else started
+                    if now - last > silence_s:
+                        logger.warning("[WATCHDOG] silencio del cliente ({}s), cerrando llamada", int(now - last))
+                        await _hard_hangup(ctx, session, "silencio_cliente")
+                        return
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            logger.warning("[WATCHDOG] error: {}", redact_sensitive(str(exc)))
+
+    async def _hard_hangup(ctx, session, reason: str) -> None:
+        """Cierre COMPLETO: shutdown del agente + borrar room + shutdown del job.
+        Sin esto, la llamada SIP/Twilio queda viva (minutos) y se cobra."""
+        try:
+            session.shutdown(drain=False)
+        except Exception as exc:
+            logger.warning("[HANGUP] session shutdown: {}", redact_sensitive(str(exc)))
+        try:
+            await ctx.delete_room(room_name=ctx.room.name)
+        except Exception as exc:
+            logger.warning("[HANGUP] delete_room: {}", redact_sensitive(str(exc)))
+        try:
+            ctx.shutdown(reason=f"watchdog_{reason}")
+        except Exception as exc:
+            logger.warning("[HANGUP] job shutdown: {}", redact_sensitive(str(exc)))
+
+    asyncio.create_task(call_watchdog(session, agent, config, ctx))
 
     recording_id = None
     if should_store_call_audio(config):

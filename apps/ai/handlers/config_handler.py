@@ -131,6 +131,9 @@ def normalize_config(raw: dict[str, Any]) -> dict[str, Any]:
             "store_call_audio": _pick_bool(raw, "storeCallAudio", "store_call_audio", default=True),
             "zero_pii_retention": _pick_bool(raw, "zeroPiiRetention", "zero_pii_retention", default=False),
             "retention_days": _pick(raw, "retentionDays", "retention_days"),
+            "silence_end_call_timeout_seconds": _pick(raw, "silence_end_call_timeout_seconds") or DEFAULT_CONFIG.get("silence_end_call_timeout_seconds", 20),
+            "turn_timeout_seconds": _pick(raw, "turn_timeout_seconds") or DEFAULT_CONFIG.get("turn_timeout_seconds", 25),
+            "max_conversation_duration_seconds": _pick(raw, "max_conversation_duration_seconds") or DEFAULT_CONFIG.get("max_conversation_duration_seconds", 300),
         }
     )
     return config
@@ -267,7 +270,28 @@ def _normalize_language(language: str) -> str:
 
 
 async def _get_json(url: str, headers: dict[str, str]):
-    return await asyncio.to_thread(_blocking_get_json, url, headers)
+    # Retry con timeout corto por intento: si quickvoice-server esta lento
+    # (contencion de CPU), un solo intento de 30s mataba el job de la llamada
+    # (TimeoutError -> "job crashed"). 3 intentos de 10s con backoff cortos
+    # tolera picos de hasta ~35s sin degradar el caso feliz.
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(_blocking_get_json, url, headers),
+                timeout=10 + 10 * attempt,
+            )
+        except HTTPError:
+            raise  # 4xx/5xx determinista del servidor: reintentar no ayuda
+        except Exception as exc:  # noqa: BLE001 - timeouts / fallos de red si se reintenta
+            last_exc = exc
+            logger.warning(
+                "config fetch attempt {}/{} failed for {}: {}",
+                attempt + 1, 3, url.rsplit("/", 1)[-1], type(exc).__name__,
+            )
+            if attempt < 2:
+                await asyncio.sleep(1.0 + attempt)
+    raise last_exc  # type: ignore[misc]
 
 
 def _blocking_get_json(url: str, headers: dict[str, str]):
