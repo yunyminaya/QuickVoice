@@ -10,6 +10,16 @@ from handlers import rag_handler
 
 
 class RagHandlerTests(unittest.TestCase):
+    def setUp(self):
+        self._original_vector_backend = os.environ.get("KB_VECTOR_BACKEND")
+        os.environ["KB_VECTOR_BACKEND"] = "pinecone"
+
+    def tearDown(self):
+        if self._original_vector_backend is None:
+            os.environ.pop("KB_VECTOR_BACKEND", None)
+        else:
+            os.environ["KB_VECTOR_BACKEND"] = self._original_vector_backend
+
     def test_embed_query_uses_pinecone_inference_query_embedding(self):
         calls = []
 

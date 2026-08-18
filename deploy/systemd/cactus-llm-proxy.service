@@ -1,0 +1,15 @@
+[Unit]
+Description=QuickVoice local-first OpenAI-compatible LLM proxy
+After=network.target lfm2-local-llm.service zai-llm-proxy.service
+Wants=lfm2-local-llm.service zai-llm-proxy.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/yuny
+ExecStart=/home/yuny/cactus/venv/bin/python -u /home/yuny/cactus/cactus_proxy.py
+Restart=always
+RestartSec=2
+Nice=-8
+
+[Install]
+WantedBy=multi-user.target

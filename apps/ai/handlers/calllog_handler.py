@@ -29,7 +29,7 @@ def build_call_log_payload(
     metadata = _build_metadata(call_context, transcripts)
     return {
         "organizationId": _required(config, "organization_id"),
-        "userId": config.get("user_id"),
+        "userId": config.get("user_id") or os.getenv("INTERNAL_USER_ID"),
         "agentId": _required(config, "agent_id"),
         "callId": _required(call_context, "call_id"),
         "startTime": _isoformat(started_at),
@@ -67,7 +67,7 @@ async def post_call_log(
         "Content-Type": "application/json",
         "x-organization-id": _required(payload, "organizationId"),
     }
-    user_id = payload.get("userId")
+    user_id = payload.get("userId") or os.getenv("INTERNAL_USER_ID")
     if user_id:
         headers["x-user-id"] = user_id
 

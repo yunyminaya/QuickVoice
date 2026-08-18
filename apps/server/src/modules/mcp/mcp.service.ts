@@ -36,6 +36,46 @@ type CatalogItemLike = {
 const SMITHERY_NAMESPACE = process.env.SMITHERY_NAMESPACE;
 const SMITHERY_RUN_BASE_URL = process.env.SMITHERY_RUN_BASE_URL || "https://smithery.run";
 const SMITHERY_API_BASE_URL = process.env.SMITHERY_API_BASE_URL || "https://api.smithery.ai";
+const DIRECT_MCP_HOSTS = new Set(
+  (process.env.MCP_DIRECT_CUSTOM_HOSTS || "")
+    .split(",")
+    .map((host) => host.trim().toLowerCase())
+    .filter(Boolean)
+);
+
+const isDirectCustomMcp = (mcpUrl: string) =>
+  DIRECT_MCP_HOSTS.has(new URL(mcpUrl).hostname.toLowerCase());
+
+const callDirectMcp = async (
+  mcpUrl: string,
+  method: "tools/list" | "tools/call",
+  params: Record<string, unknown>
+) => {
+  const response = await fetch(mcpUrl, {
+    method: "POST",
+    headers: {
+      Accept: "application/json, text/event-stream",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ jsonrpc: "2.0", id: randomUUID(), method, params }),
+    signal: AbortSignal.timeout(15_000),
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok || body?.error) {
+    throw new Error(body?.error?.message || `Direct MCP request failed with HTTP ${response.status}`);
+  }
+  return body?.result ?? {};
+};
+
+const listDirectMcpTools = async (mcpUrl: string) => {
+  const result = await callDirectMcp(mcpUrl, "tools/list", {});
+  const tools = Array.isArray(result?.tools) ? result.tools : [];
+  return tools.map((tool: { name: string; description?: string; title?: string; inputSchema?: unknown }) => ({
+    name: tool.name,
+    description: tool.description ?? tool.title ?? "",
+    inputSchema: tool.inputSchema ?? null,
+  }));
+};
 
 const getSmitheryApiKey = () => {
   const key = process.env.SMITHERY_API_KEY;
@@ -358,6 +398,39 @@ export const connect = async (
   await assertSafeRemoteUrl(mcpUrl);
 
   const displayName = input.displayName || catalogItem?.name || new URL(mcpUrl).hostname;
+  if (!catalogItem && isDirectCustomMcp(mcpUrl)) {
+    const tools = await listDirectMcpTools(mcpUrl).catch((error) => {
+      throw new BadRequestError(
+        error instanceof Error ? error.message : "Could not list direct MCP tools"
+      );
+    });
+    const persistedCatalogItem = await repository.upsertCustomCatalogItem({
+      organizationId,
+      slug: slugify(displayName),
+      name: displayName,
+      description: "Private direct MCP server",
+      source: "CUSTOM",
+      provider: "direct",
+      mcpUrl,
+      authType: "network",
+      categories: ["Private"],
+      verified: false,
+    });
+    return repository.upsertConnection({
+      organizationId,
+      userId,
+      catalogItemId: persistedCatalogItem.mcpServerId,
+      displayName,
+      mcpUrl,
+      smitheryNamespace: "direct",
+      smitheryConnectionId: `direct-${randomUUID()}`,
+      status: "CONNECTED",
+      setupUrl: null,
+      tools,
+      metadata: { source: "direct", transport: "streamable-http" },
+      lastSyncedAt: new Date(),
+    });
+  }
   const rawConnectionKey = catalogItem?.smitheryServerKey ?? `custom-${slugify(displayName)}-${randomUUID().slice(0, 8)}`;
   const connectionKey = slugify(rawConnectionKey);
   const smitheryConnectionId = `${organizationId.slice(0, 8)}-${connectionKey}`.slice(0, 96);
@@ -452,6 +525,31 @@ export const refreshConnection = async (organizationId: string, mcpConnectionId:
   const connection = await repository.findConnection(organizationId, mcpConnectionId);
   if (!connection) throw new NotFoundError("MCP connection not found");
 
+  if (metadataObject(connection.metadata).source === "direct") {
+    try {
+      const tools = await listDirectMcpTools(connection.mcpUrl);
+      await repository.updateConnectionStatus(organizationId, mcpConnectionId, {
+        status: "CONNECTED",
+        tools,
+        setupUrl: null,
+        metadata: { ...metadataObject(connection.metadata), lastSyncError: null },
+        lastSyncedAt: new Date(),
+      });
+    } catch (error) {
+      await repository.updateConnectionStatus(organizationId, mcpConnectionId, {
+        status: "ERROR",
+        tools: connection.tools as unknown[],
+        setupUrl: null,
+        metadata: {
+          ...metadataObject(connection.metadata),
+          lastSyncError: error instanceof Error ? error.message : "Could not sync direct MCP tools",
+        },
+        lastSyncedAt: connection.lastSyncedAt,
+      });
+    }
+    return repository.findConnection(organizationId, mcpConnectionId);
+  }
+
   let tools: unknown[] = [];
   let status: McpStatus = "CONNECTED";
   let error: string | null = null;
@@ -538,7 +636,9 @@ export const disconnect = async (organizationId: string, mcpConnectionId: string
   const connection = await repository.findConnection(organizationId, mcpConnectionId);
   if (!connection) throw new NotFoundError("MCP connection not found");
 
-  await disconnectSmitheryConnection(connection.smitheryNamespace, connection.smitheryConnectionId).catch(() => undefined);
+  if (metadataObject(connection.metadata).source !== "direct") {
+    await disconnectSmitheryConnection(connection.smitheryNamespace, connection.smitheryConnectionId).catch(() => undefined);
+  }
   await repository.deleteConnection(organizationId, mcpConnectionId);
 };
 
@@ -566,12 +666,17 @@ export const executeTool = async (
 
   const startedAt = Date.now();
   try {
-    const result = await callSmitheryTool(
-      connection.smitheryNamespace,
-      connection.smitheryConnectionId,
-      toolName,
-      input.arguments as Record<string, unknown>
-    );
+    const result = metadataObject(connection.metadata).source === "direct"
+      ? await callDirectMcp(connection.mcpUrl, "tools/call", {
+          name: toolName,
+          arguments: input.arguments as Record<string, unknown>,
+        })
+      : await callSmitheryTool(
+          connection.smitheryNamespace,
+          connection.smitheryConnectionId,
+          toolName,
+          input.arguments as Record<string, unknown>
+        );
     if (isGoogleDriveMcp(connection.mcpUrl) && isInsufficientGoogleScope(result)) {
       throw new Error("Google Drive access was not granted during OAuth setup.");
     }

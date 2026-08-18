@@ -133,6 +133,7 @@ def _catalog_language_id(language: str) -> str:
     value = language.strip()
     return {
         "en-US": "en",
+        "es-ES": "es",
         "hi-IN": "hi",
     }.get(value, value)
 

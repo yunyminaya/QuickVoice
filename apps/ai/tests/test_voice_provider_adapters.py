@@ -60,7 +60,7 @@ class VoiceProviderAdapterTests(unittest.TestCase):
             },
         }
         with patch.dict(os.environ, {"DEEPGRAM_API_KEY": "d"}, clear=True):
-            with patch("handlers.voice_provider_adapters.deepgram.TTS") as tts:
+            with patch("livekit.plugins.deepgram.TTS") as tts:
                 build_voice_provider_adapters(config)
 
         tts.assert_called_once_with(model="aura-2-asteria-en", api_key="d")
@@ -90,7 +90,7 @@ class VoiceProviderAdapterTests(unittest.TestCase):
             },
         }
         with patch.dict(os.environ, {"DEEPGRAM_API_KEY": "d", "ELEVENLABS_API_KEY": "e"}, clear=True):
-            with patch("handlers.voice_provider_adapters.deepgram.STT") as stt:
+            with patch("livekit.plugins.deepgram.STT") as stt:
                 build_voice_provider_adapters(config)
 
         stt.assert_called_once_with(model="nova-3", language="multi", api_key="d")

@@ -1,9 +1,11 @@
 import os
 import warnings
+import httpx
 from dataclasses import dataclass
 from typing import Any
 
-from livekit.plugins import deepgram, elevenlabs, sarvam
+# Import perezoso: los plugins se importan SOLO cuando su provider se usa.
+# (importar deepgram/elevenlabs/sarvam juntos tarda ~15s y mata la llamada)
 
 
 class ProviderAdapterError(RuntimeError):
@@ -45,16 +47,26 @@ def _build_stt(config: dict[str, Any], language: str):
     provider = config["provider"]
     model = config["model"]
     if provider == "deepgram":
+        from livekit.plugins import deepgram
         return deepgram.STT(
             model=model,
             language=_deepgram_language(language),
             api_key=_required_env("DEEPGRAM_API_KEY"),
         )
     if provider == "sarvam":
+        from livekit.plugins import sarvam
         return sarvam.STT(
             model=model,
             language=_sarvam_language(language),
             api_key=_required_env("SARVAM_API_KEY"),
+        )
+    if provider == "openai":
+        openai_plugin = _openai_plugin()
+        return openai_plugin.STT(
+            model=model,
+            language=language,
+            base_url=os.getenv("WHISPER_STT_BASE_URL"),
+            api_key=os.getenv("WHISPER_STT_API_KEY", "local"),
         )
     raise ProviderAdapterError(f"unsupported STT provider: {provider}")
 
@@ -84,6 +96,11 @@ def _build_llm(config: dict[str, Any]):
             "model": config["model"],
             "base_url": os.getenv("OPENAI_BASE_URL"),
             "api_key": os.getenv("OPENAI_API_KEY"),
+            "timeout": httpx.Timeout(
+                float(os.getenv("OPENAI_LLM_TIMEOUT_SECONDS", "90")),
+                connect=5.0,
+            ),
+            "max_retries": 0,
         }
         return openai_plugin.LLM(**kwargs)
     raise ProviderAdapterError(f"unsupported LLM provider: {provider}")
@@ -94,6 +111,7 @@ def _build_tts(config: dict[str, Any], language: str):
     model = config["model"]
     voice = config["voice"]
     if provider == "elevenlabs":
+        from livekit.plugins import elevenlabs
         return elevenlabs.TTS(
             model=model,
             voice_id=voice,
@@ -101,18 +119,48 @@ def _build_tts(config: dict[str, Any], language: str):
             api_key=_required_env("ELEVENLABS_API_KEY"),
         )
     if provider == "deepgram":
+        from livekit.plugins import deepgram
         return deepgram.TTS(
             model=voice or model,
             api_key=_required_env("DEEPGRAM_API_KEY"),
         )
     if provider == "sarvam":
+        from livekit.plugins import sarvam
         return sarvam.TTS(
             model=model,
             speaker=voice,
             target_language_code=_sarvam_language(language),
             api_key=_required_env("SARVAM_API_KEY"),
         )
+    if provider == "openai":
+        openai_plugin = _openai_plugin()
+        tts = openai_plugin.TTS(
+            model=model,
+            voice=voice,
+            base_url=os.getenv("KOKORO_TTS_BASE_URL"),
+            api_key=os.getenv("KOKORO_TTS_API_KEY", "local"),
+            response_format="wav",
+        )
+        # El servidor Kokoro local devuelve WAV binario en una sola respuesta
+        # (no SSE). Forzar el stream binario (AudioChunkedStream) en vez del
+        # SSE que el plugin usa por defecto para modelos no listados.
+        try:
+            from livekit.plugins.openai import tts as _oai_tts
+            _oai_tts.AUDIO_STREAM_MODELS.add(model)
+        except Exception:
+            pass
+        return tts
     raise ProviderAdapterError(f"unsupported TTS provider: {provider}")
+
+
+def _openai_plugin():
+    # Import directo de las clases (1.8s) en vez del paquete completo (11s:
+    # el __init__ importa realtime/responses/tools que no usamos).
+    # NOTA: las clases NO ven las variables de la funcion que las envuelve,
+    # por eso se asignan por dict y se construye el objeto con type().
+    from livekit.plugins.openai import LLM, STT, TTS
+
+    return type("_OpenAI", (), {"LLM": LLM, "STT": STT, "TTS": TTS})
 
 
 def _aws_plugin():

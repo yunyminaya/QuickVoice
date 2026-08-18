@@ -23,6 +23,7 @@ STATIC_VOICE_CATALOG = {
     },
     "languages": [
         {"id": "en", "label": "English", "locale": "en-US"},
+        {"id": "es", "label": "Spanish", "locale": "es-ES"},
         {"id": "hi", "label": "Hindi", "locale": "hi-IN"},
         {"id": "en-IN", "label": "English (India)", "locale": "en-IN"},
     ],
@@ -61,7 +62,23 @@ STATIC_VOICE_CATALOG = {
             "runtime_model": "saaras:v3",
             "billing_model": "sarvam/saaras:v3",
         },
-    ],
+            {
+            "provider": "openai",
+            "id": "whisper-1",
+            "label": "Whisper Local (faster-whisper)",
+            "languages": ["en", "es", "en-IN", "hi"],
+            "runtime_model": "whisper-1",
+            "billing_model": "openai/whisper-1",
+        },
+        {
+            "provider": "openai",
+            "id": "whisper-large-v3-turbo",
+            "label": "Whisper Large V3 Turbo (Groq, rapido)",
+            "languages": ["en", "es", "en-IN", "hi"],
+            "runtime_model": "whisper-large-v3-turbo",
+            "billing_model": "openai/whisper-large-v3-turbo",
+        },
+],
     "llm_models": [
         {
             "provider": "bedrock",
@@ -95,7 +112,15 @@ STATIC_VOICE_CATALOG = {
             "billing_model": "bedrock/us.amazon.nova-lite-v1:0",
             "streaming": True,
         },
-    ],
+            {
+            "provider": "openai",
+            "id": "glm-5.2",
+            "label": "GLM 5.2 (z.ai)",
+            "runtime_model": "glm-5.2",
+            "billing_model": "openai/glm-5.2",
+            "streaming": True,
+        },
+],
     "tts_models": [
         {
             "provider": "deepgram",
@@ -129,7 +154,15 @@ STATIC_VOICE_CATALOG = {
             "runtime_model": "bulbul:v3",
             "billing_model": "sarvam/bulbul:v3",
         },
-    ],
+            {
+            "provider": "openai",
+            "id": "kokoro",
+            "label": "Kokoro Local (ef_dora)",
+            "languages": ["en", "es"],
+            "runtime_model": "kokoro",
+            "billing_model": "openai/kokoro",
+        },
+],
     "voices": [
         {
             "provider": "deepgram",
@@ -187,7 +220,15 @@ STATIC_VOICE_CATALOG = {
             "tts_models": ["bulbul:v3"],
             "runtime_voice": "shubh",
         },
-    ],
+            {
+            "provider": "openai",
+            "id": "ef_dora",
+            "label": "Kokoro ef_dora (Spanish)",
+            "languages": ["en", "es"],
+            "runtime_voice": "ef_dora",
+            "tts_models": ["kokoro"],
+        },
+],
 }
 
 

@@ -182,6 +182,12 @@ class BillingUsageReporter:
                 return False
             return True
 
+        # En self-hosted, la facturación nunca debe bloquear el inicio del audio.
+        # El endpoint puede tardar o estar caído; enviamos el reporte en segundo plano.
+        if not self._required:
+            asyncio.create_task(self.report_now(), name=f"billing-authorize-{self._identifiers.session_id}")
+            return True
+
         delivered = await self.report_now()
         if self._stop_requested:
             return False

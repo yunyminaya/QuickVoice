@@ -11,6 +11,16 @@ from utils.pinecone_client import pinecone_api_key, pinecone_host
 
 
 class KbHandlerTests(unittest.TestCase):
+    def setUp(self):
+        self._original_vector_backend = os.environ.get("KB_VECTOR_BACKEND")
+        os.environ["KB_VECTOR_BACKEND"] = "pinecone"
+
+    def tearDown(self):
+        if self._original_vector_backend is None:
+            os.environ.pop("KB_VECTOR_BACKEND", None)
+        else:
+            os.environ["KB_VECTOR_BACKEND"] = self._original_vector_backend
+
     def test_pinecone_api_key_is_trimmed_before_client_use(self):
         original = os.environ.get("PINECONE_API_KEY")
         try:
@@ -106,11 +116,54 @@ class KbHandlerTests(unittest.TestCase):
         finally:
             kb_handler.ALLOWED_HOSTS = original_allowed_hosts
 
+    def test_file_download_allows_only_explicit_trusted_private_origin(self):
+        original_origins = kb_handler.TRUSTED_FILE_ORIGINS
+        try:
+            kb_handler.TRUSTED_FILE_ORIGINS = {"http://127.0.0.1:9000"}
+            trusted = "http://127.0.0.1:9000/quickvoice-dev/document.txt?signature=test"
+            self.assertEqual(kb_handler.validate_file_download_url(trusted), trusted)
+
+            with self.assertRaises(ValueError):
+                kb_handler.validate_file_download_url("http://127.0.0.1:9001/admin")
+            with self.assertRaises(ValueError):
+                kb_handler.validate_ingest_url(trusted)
+        finally:
+            kb_handler.TRUSTED_FILE_ORIGINS = original_origins
+
     def test_validate_content_type_blocks_unexpected_url_media(self):
         with self.assertRaises(ValueError):
             kb_handler._validate_content_type("application/octet-stream", "html")
 
         kb_handler._validate_content_type("text/html; charset=utf-8", "html")
+
+    def test_local_kb_backend_indexes_without_pinecone(self):
+        original_backend = os.environ.get("KB_VECTOR_BACKEND")
+        original_path = os.environ.get("LOCAL_KB_DB_PATH")
+        path = "/tmp/quickvoice-kb-handler-test.sqlite3"
+        try:
+            os.environ["KB_VECTOR_BACKEND"] = "local"
+            os.environ["LOCAL_KB_DB_PATH"] = path
+            kb_handler.local_kb.replace_chunks(
+                agent_id="agent_local",
+                kb_id="kb_local",
+                name="Public info",
+                chunks=["Vuelos desde Miami hacia Santo Domingo"],
+            )
+            matches = kb_handler.local_kb.search_chunks(
+                agent_id="agent_local", query="vuelo Miami", top_k=3
+            )
+            self.assertEqual(matches[0]["metadata"]["kbId"], "kb_local")
+        finally:
+            if os.path.exists(path):
+                os.unlink(path)
+            if original_backend is None:
+                os.environ.pop("KB_VECTOR_BACKEND", None)
+            else:
+                os.environ["KB_VECTOR_BACKEND"] = original_backend
+            if original_path is None:
+                os.environ.pop("LOCAL_KB_DB_PATH", None)
+            else:
+                os.environ["LOCAL_KB_DB_PATH"] = original_path
 
     def test_process_documents_enforces_chunk_budget_before_embedding(self):
         calls = {"embed": 0, "upsert": 0}

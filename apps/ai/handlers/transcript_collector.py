@@ -68,6 +68,10 @@ class TranscriptCollector:
         if not bool(getattr(event, "is_final", False)):
             return
         text = str(getattr(event, "transcript", "") or "").strip()
+        import logging as _lg
+        _lg.getLogger("quickvoice.diag").warning(
+            "[DIAG] user_input_transcribed final: %r", text[:100]
+        )
         if not text or text == self._last_final_user_transcript:
             return
         self._last_final_user_transcript = text

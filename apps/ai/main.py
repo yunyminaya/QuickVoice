@@ -2,6 +2,7 @@ from dotenv import load_dotenv
 
 from livekit import agents, rtc
 from livekit.agents import (
+    APIConnectOptions,
     AgentSession,
     Agent,
     JobContext,
@@ -11,6 +12,7 @@ from livekit.agents import (
     inference,
     room_io,
 )
+from livekit.agents.voice.agent_session import SessionConnectOptions
 from livekit.agents.beta.tools import send_dtmf_events
 from livekit.plugins import noise_cancellation, silero
 from handlers.billing_usage_reporter import (
@@ -177,6 +179,11 @@ def build_room_options() -> room_io.RoomOptions:
     )
 
 
+def prewarm_voice_process(proc: agents.JobProcess) -> None:
+    """Load local turn-taking models before a phone call is assigned."""
+    proc.userdata["vad"] = silero.VAD.load()
+
+
 def _transcription_chunk_text(chunk) -> str:
     text = getattr(chunk, "text", None)
     if text is not None:
@@ -188,7 +195,7 @@ def provider_section(value: str | None):
     if not value or "/" not in value:
         return None
     provider, model = value.split("/", 1)
-    if provider in {"deepgram", "sarvam", "bedrock", "elevenlabs"}:
+    if provider in {"deepgram", "sarvam", "bedrock", "elevenlabs", "openai"}:
         return {"provider": provider, "model": model}
     return None
 
@@ -229,7 +236,7 @@ def attach_resolved_voice_config(config: dict) -> dict:
 
     tts_section = provider_section(config.get("tts_model"))
     if tts_section is not None:
-        tts_section = {**tts_section, "voice": config.get("voice")}
+        tts_section = {**tts_section, "voice": config.get("voice") or config.get("voiceId")}
     try:
         voice_config = resolve_voice_config(
             {
@@ -241,8 +248,18 @@ def attach_resolved_voice_config(config: dict) -> dict:
             },
             load_voice_catalog(),
         )
-    except Exception:
-        return config
+    except Exception as error:
+        # Never fall back to LiveKit Cloud inference when local providers are
+        # configured. A catalog mismatch must not turn local voice into a
+        # cloud 401 and silence the phone agent.
+        logger.warning("[VOICE_CONFIG] catalog resolution failed; using direct local adapters: {}", error)
+        voice_config = {
+            "language": str(config.get("agent_language", "en-US")),
+            "timezone": config.get("timezone"),
+            "stt": provider_section(config.get("stt_model")),
+            "llm": provider_section(config.get("llm_model")),
+            "tts": tts_section,
+        }
 
     updated = dict(config)
     updated["voice_config"] = voice_config
@@ -400,14 +417,13 @@ class Assistant(Agent):
         try:
             context = await get_rag_context(agent_id=agent_id, query=query)
         except RagRetrievalError:
-            turn_ctx.add_message(
-                role="system",
-                content=(
-                    "Knowledge base retrieval failed for the user's latest question. "
-                    "Tell the user the knowledge base is temporarily unavailable and do not invent an answer."
-                ),
+            # FIX: NO bloquear la respuesta del agente si el RAG falla.
+            # Antes este except hacia `return` -> el LLM nunca se llamaba y
+            # el agente se quedaba mudo. Ahora seguimos sin contexto RAG.
+            logger.warning(
+                "[rag] retrieval failed, continuing WITHOUT rag context for agent={}",
+                redact_sensitive(agent_id),
             )
-            logger.warning("[rag] injected unavailable signal for agent={}", redact_sensitive(agent_id))
             return
 
         if not context:
@@ -506,6 +522,25 @@ class Assistant(Agent):
             call_context=self._call_context,
         )
         return json.dumps(result.get("data", result), ensure_ascii=False)
+        return json.dumps(result.get("data", result), ensure_ascii=False)
+
+    @function_tool
+    async def end_call(self, farewell_message: str = "") -> str:
+        """
+        End the call immediately / Colgar la llamada.
+
+        Use this tool ONLY after saying goodbye to the customer (e.g. after
+        "¡Gracias y buen viaje!" or when the customer says they need nothing
+        else). If farewell_message is provided, it is spoken first, then the
+        call hangs up. Never use it while the customer still needs help.
+        """
+        if farewell_message:
+            try:
+                await self.say(farewell_message)
+            except Exception as exc:
+                logger.warning("end_call farewell failed: {}", redact_sensitive(str(exc)))
+        self.shutdown()
+        return "Call ended / Llamada finalizada."
 
     @function_tool
     async def call_mcp_tool(self, connection_id: str, tool_name: str, arguments_json: str = "{}") -> str:
@@ -645,9 +680,25 @@ async def entrypoint(ctx: JobContext):
     )
     session = AgentSession(
         **provider_kwargs,
-        vad=silero.VAD.load(),
+        vad=ctx.proc.userdata.get("vad") or silero.VAD.load(),
         turn_handling=TurnHandlingOptions(
-            turn_detection=inference.TurnDetector(),
+            # turn_detection="vad": con "stt" + STT no-streaming (Groq) el
+            # SDK tiene un deadlock: el VAD no commitea (vad_base=False) y
+            # el FINAL_TRANSCRIPT tampoco (necesita _user_turn_committed que
+            # solo se pone DENTRO del commit) -> el turno NUNCA se commitea
+            # -> el LLM nunca se llama -> el agente no responde. Con "vad",
+            # el silero VAD local detecta inicio/fin del habla y commitea.
+            # El eco del saludo se descarta (saludo allow_interruptions=False)
+            # y el VAD usa 4 threads (rapido).
+            turn_detection="vad",
+            # Endpointing: espera 1.8s de silencio (max 6s) para dar tiempo
+            # a Groq (~0.5-2.4s) a transcribir antes de cerrar el turno.
+            endpointing={"min_delay": 0.8, "max_delay": 3.0},
+        ),
+        conn_options=SessionConnectOptions(
+            stt_conn_options=APIConnectOptions(timeout=float(os.getenv("STT_CONNECT_TIMEOUT_SECONDS", "30"))),
+            llm_conn_options=APIConnectOptions(timeout=float(os.getenv("LLM_CONNECT_TIMEOUT_SECONDS", "45"))),
+            tts_conn_options=APIConnectOptions(timeout=float(os.getenv("TTS_CONNECT_TIMEOUT_SECONDS", "45"))),
         ),
         ivr_detection=config["ivr_navigation_enabled"],
     )
@@ -749,6 +800,7 @@ async def entrypoint(ctx: JobContext):
     )
     if not preview_mode:
         await live_transcript_publisher.start(call_start_time)
+
     transcript_collector = TranscriptCollector(
         on_item=live_transcript_publisher.publish_transcript
     ).attach(session)
@@ -797,6 +849,12 @@ async def entrypoint(ctx: JobContext):
             on_preview_text_stream,
         )
 
+    # AgentSession commits the VAD/STT turn and invokes the LLM once through
+    # its normal endpointing pipeline. Do not call generate_reply from the
+    # user_input_transcribed event: STT can emit several final fragments for
+    # one spoken turn, which would queue duplicate TTS replies and make the
+    # agent repeat itself.
+
     try:
         await session.start(
             room=ctx.room,
@@ -808,8 +866,32 @@ async def entrypoint(ctx: JobContext):
         await live_transcript_publisher.close(reason="session_start_failed")
         raise
     session_started = True
+    # Sin saludo inicial el SDK puede dejar pausado el planificador de habla.
+    # En ese estado el LLM genera, pero el TTS no se publica al SIP.
+    activity = getattr(session, "_activity", None)
+    if activity is not None and getattr(activity, "scheduling_paused", False):
+        async with activity._lock:
+            await activity._resume_scheduling_task()
+    logger.warning(
+        "[QVDIAG] scheduler after start paused={} task={} task_done={}",
+        getattr(activity, "scheduling_paused", None),
+        bool(getattr(activity, "_scheduling_atask", None)),
+        getattr(getattr(activity, "_scheduling_atask", None), "done", lambda: None)(),
+    )
     await billing_reporter.start()
-    speak_first_message(session, config)
+    first_message_handle = speak_first_message(session, config)
+    if first_message_handle is not None:
+        async def resume_after_first_message() -> None:
+            try:
+                await first_message_handle.wait_for_playout()
+            finally:
+                current_activity = getattr(session, "_activity", None)
+                if current_activity is not None and getattr(current_activity, "scheduling_paused", False):
+                    async with current_activity._lock:
+                        await current_activity._resume_scheduling_task()
+                logger.info("[QVDIAG] scheduler resumed after first message")
+
+        asyncio.create_task(resume_after_first_message())
 
     recording_id = None
     if should_store_call_audio(config):
@@ -882,6 +964,15 @@ if __name__ == "__main__":
     agents.cli.run_app(
         agents.WorkerOptions(
             entrypoint_fnc=entrypoint,
+            prewarm_fnc=prewarm_voice_process,
             agent_name=os.getenv("LIVEKIT_AGENT_NAME", "quickvoice-voice-agent"),
+            # Servidor de 5.8GB RAM: 1 solo proceso hijo (4 por defecto = OOM).
+            # Timeout de init 60s (10s default muere en maquinas cargadas).
+            num_idle_processes=int(os.getenv("LIVEKIT_NUM_PROCESSES", "1")),
+            initialize_process_timeout=float(os.getenv("LIVEKIT_INIT_TIMEOUT", "60")),
+            # Umbral de carga 0.95: el default (0.7) marca el worker como
+            # "unavailable" con la carga interna del VAD/STT (~0.7-0.9) y
+            # LiveKit deja de enviarle llamadas -> "no contesta nadie".
+            load_threshold=float(os.getenv("LIVEKIT_LOAD_THRESHOLD", "0.95")),
         )
     )

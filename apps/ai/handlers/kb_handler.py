@@ -20,6 +20,7 @@ from urllib.parse import urlparse, urlunparse
 
 from utils.logger import logger, redact_sensitive
 from utils.metrics import emit_metric
+from utils import local_kb
 from utils.pinecone_client import pinecone_client, pinecone_host
 
 # ── lazy imports (heavy deps loaded once) ────────────────────────────────────
@@ -50,6 +51,11 @@ ALLOWED_HOSTS = [
     for host in os.environ.get("KB_ALLOWED_HOSTS", "").split(",")
     if host.strip()
 ]
+TRUSTED_FILE_ORIGINS = {
+    origin.strip().lower().rstrip("/")
+    for origin in os.environ.get("KB_TRUSTED_FILE_ORIGINS", "").split(",")
+    if origin.strip()
+}
 ALLOWED_CONTENT_TYPES = (
     "text/",
     "application/pdf",
@@ -562,10 +568,15 @@ async def download_bytes(
     *,
     max_bytes: int = MAX_DOWNLOAD_BYTES,
     expected_content: str | None = None,
+    allow_trusted_file_origin: bool = False,
 ) -> bytes:
     import httpx  # type: ignore
 
-    safe_url = validate_ingest_url(url)
+    safe_url = (
+        validate_file_download_url(url)
+        if allow_trusted_file_origin
+        else validate_ingest_url(url)
+    )
     async with httpx.AsyncClient(follow_redirects=False, timeout=60) as client:
         current_url = safe_url
         for _ in range(5):
@@ -608,6 +619,36 @@ def validate_ingest_url(url: str) -> str:
 
     _validate_public_host(host)
     return urlunparse(parsed._replace(scheme=parsed.scheme.lower(), netloc=parsed.netloc.lower()))
+
+
+def validate_file_download_url(url: str) -> str:
+    """Allow only explicitly configured private origins for uploaded KB files."""
+    parsed = urlparse(url)
+    if parsed.scheme.lower() not in ALLOWED_SCHEMES:
+        raise ValueError("Only http and https URLs are allowed for KB ingestion")
+    if not parsed.hostname:
+        raise ValueError("URL host is required")
+    if parsed.username or parsed.password:
+        raise ValueError("URL credentials are not allowed")
+
+    default_port = 443 if parsed.scheme.lower() == "https" else 80
+    port = parsed.port or default_port
+    origin = f"{parsed.scheme.lower()}://{parsed.hostname.rstrip('.').lower()}:{port}"
+    trusted_origins = {
+        _normalize_origin(configured)
+        for configured in TRUSTED_FILE_ORIGINS
+    }
+    if origin in trusted_origins:
+        return urlunparse(parsed._replace(scheme=parsed.scheme.lower(), netloc=parsed.netloc.lower()))
+    return validate_ingest_url(url)
+
+
+def _normalize_origin(origin: str) -> str:
+    parsed = urlparse(origin)
+    if parsed.scheme.lower() not in ALLOWED_SCHEMES or not parsed.hostname:
+        return ""
+    default_port = 443 if parsed.scheme.lower() == "https" else 80
+    return f"{parsed.scheme.lower()}://{parsed.hostname.rstrip('.').lower()}:{parsed.port or default_port}"
 
 
 def _validate_public_host(host: str) -> None:
@@ -783,6 +824,9 @@ def upsert_to_pinecone(
 
 
 def delete_kb_vectors(*, namespace: str, kb_id: str) -> None:
+    if local_kb.enabled():
+        local_kb.delete_chunks(agent_id=namespace, kb_id=kb_id)
+        return
     _delete_kb_vectors(index=_index(), namespace=namespace, kb_id=kb_id)
 
 
@@ -854,8 +898,8 @@ async def process_documents(payload: dict, progress=None, should_cancel=None) ->
             else:
                 if not presigned_url:
                     raise ValueError("presignedUrl is required for file source types")
-                validate_ingest_url(presigned_url)
-                content = await download_bytes(presigned_url)
+                validate_file_download_url(presigned_url)
+                content = await download_bytes(presigned_url, allow_trusted_file_origin=True)
                 text = parse_file(content, source_type)
 
             if not text.strip():
@@ -884,7 +928,7 @@ async def process_documents(payload: dict, progress=None, should_cancel=None) ->
                 progress,
                 {**result_base, "status": "running", "stage": "embedding", "chunks": len(chunks)},
             )
-            embeddings = await embed_chunks(chunks)
+            embeddings = [] if local_kb.enabled() else await embed_chunks(chunks)
 
             # 4. Upsert to Pinecone (namespace = agentId for per-agent isolation)
             if should_cancel and should_cancel():
@@ -896,7 +940,10 @@ async def process_documents(payload: dict, progress=None, should_cancel=None) ->
                 progress,
                 {**result_base, "status": "running", "stage": "indexing", "chunks": len(chunks)},
             )
-            upsert_to_pinecone(chunks, embeddings, namespace=agent_id, kb_id=kb_id, doc_name=name)
+            if local_kb.enabled():
+                local_kb.replace_chunks(agent_id=agent_id, kb_id=kb_id, name=name, chunks=chunks)
+            else:
+                upsert_to_pinecone(chunks, embeddings, namespace=agent_id, kb_id=kb_id, doc_name=name)
 
             emit_metric(
                 "kb_document_processed",

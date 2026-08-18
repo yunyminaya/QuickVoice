@@ -10,9 +10,12 @@ type S3Credentials = {
 const REGION = readEnv("AWS_REGION", "REGION", "AWS_DEFAULT_REGION") ?? "us-east-1";
 const BUCKET = readEnv("S3_BUCKET_NAME", "BUCKET_NAME", "BUCKET");
 const CREDENTIALS = resolveCredentials();
+// Endpoint S3 custom (MinIO local). Se usa con path-style addressing.
+const ENDPOINT = readEnv("S3_ENDPOINT");
 
 const s3 = new S3Client({
   region: REGION,
+  ...(ENDPOINT ? { endpoint: ENDPOINT, forcePathStyle: true } : {}),
   ...(CREDENTIALS ? { credentials: CREDENTIALS } : {}),
 });
 

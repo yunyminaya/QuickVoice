@@ -457,6 +457,14 @@ def speak_first_message(session: Any, config: dict[str, Any]):
     first_message = (config.get("first_message") or "").strip()
     if not first_message:
         return None
+    # allow_interruptions=False: durante el saludo NO se procesa el audio
+    # del microfono (discard_audio_if_uninterruptible=True por defecto).
+    # Si fuera True, el ECO del saludo que rebota por el telefono seria
+    # detectado por el VAD como "voz del usuario" -> transcripciones
+    # fantasma cada 2s -> el turno nunca llega a silencio -> el LLM nunca
+    # se llama -> "el agente no responde". Con False, el eco se descarta
+    # durante el saludo y despues el turno del usuario fluye normal
+    # (turn_detection="vad" en main.py ya permite el barge-in despues).
     return session.say(first_message, allow_interruptions=False)
 
 

@@ -8,6 +8,7 @@ import asyncio
 import time
 from utils.metrics import emit_metric
 from utils.logger import logger, redact_sensitive
+from utils import local_kb
 from utils.pinecone_client import pinecone_client, pinecone_host
 
 
@@ -70,17 +71,25 @@ async def get_rag_context(agent_id: str, query: str, top_k: int = 5) -> str:
     """
     started = time.perf_counter()
     try:
-        vector = await embed_query(query)
-        index = _index()
-        resp = await asyncio.to_thread(
-            index.query,
-            vector=vector,
-            top_k=top_k,
-            namespace=_pinecone_namespace(agent_id),
-            filter=_agent_filter(agent_id),
-            include_metadata=True,
-        )
-        matches = resp.get("matches", [])
+        if local_kb.enabled():
+            matches = await asyncio.to_thread(
+                local_kb.search_chunks,
+                agent_id=agent_id,
+                query=query,
+                top_k=top_k,
+            )
+        else:
+            vector = await embed_query(query)
+            index = _index()
+            resp = await asyncio.to_thread(
+                index.query,
+                vector=vector,
+                top_k=top_k,
+                namespace=_pinecone_namespace(agent_id),
+                filter=_agent_filter(agent_id),
+                include_metadata=True,
+            )
+            matches = resp.get("matches", [])
         if not matches:
             emit_metric(
                 "rag_retrieval",

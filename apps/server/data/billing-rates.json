@@ -33,6 +33,10 @@
       "sarvam/saaras:v3": {
         "baseMicrosPerAudioMinute": "5179",
         "source": "https://www.sarvam.ai/pricing"
+      },
+      "openai/whisper-large-v3-turbo": {
+        "baseMicrosPerAudioMinute": "1000",
+        "source": "https://groq.com/pricing"
       }
     },
     "llm": {
@@ -55,6 +59,16 @@
         "baseInputMicrosPerMillionTokens": "60000",
         "baseOutputMicrosPerMillionTokens": "240000",
         "source": "https://aws.amazon.com/bedrock/pricing/"
+      },
+      "openai/glm-5.2": {
+        "baseInputMicrosPerMillionTokens": "1000000",
+        "baseOutputMicrosPerMillionTokens": "5000000",
+        "source": "https://api.z.ai/"
+      },
+      "openai/glm-4.5-air": {
+        "baseInputMicrosPerMillionTokens": "1000000",
+        "baseOutputMicrosPerMillionTokens": "5000000",
+        "source": "https://api.z.ai/"
       }
     },
     "tts": {
@@ -73,6 +87,10 @@
       "sarvam/bulbul:v3": {
         "baseMicrosPerThousandCharacters": "31069",
         "source": "https://www.sarvam.ai/pricing"
+      },
+      "openai/kokoro": {
+        "baseMicrosPerThousandCharacters": "0",
+        "source": "https://huggingface.co/hexgrad/Kokoro-82M"
       }
     }
   },

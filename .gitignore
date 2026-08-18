@@ -50,3 +50,10 @@ yarn-error.log*
 .DS_Store
 *.pem
 __pycache__/
+.data/
+knowledge/
+*.bak
+*.orig
+*.backup.*
+*.bak-*
+*.py.bak*
