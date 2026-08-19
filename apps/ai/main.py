@@ -338,6 +338,17 @@ def run_combined_server() -> int:
                 if return_code is not None:
                     logger.error(f"{name} process exited with code {return_code}")
                     stop_children()
+                    # If we are shutting down due to a signal (SIGTERM/SIGINT from
+                    # systemd), the child was killed by the same signal (-15).
+                    # Propagating the negative code makes the process exit with
+                    # 241 (256-15) which systemd mislabels as
+                    # CONFIGURATION_DIRECTORY. Exit cleanly instead.
+                    # NOTE: systemd stops the whole cgroup, so a child can die
+                    # with -15 a hair before our own SIGTERM handler sets
+                    # shutting_down (race). Treat -15 during a child exit as a
+                    # stop as well to avoid the cosmetic 241 on every restart.
+                    if (shutting_down and return_code < 0) or return_code == -15:
+                        return 0
                     return return_code or 1
             time.sleep(1)
     finally:
@@ -388,6 +399,7 @@ class Assistant(Agent):
         self._metadata_collector = CallMetadataCollector(config)
         self._transcript_collector = transcript_collector
         self._user_turn_times: list[float] = []
+        self._last_activity = time.monotonic()
 
     def _rag_enabled(self) -> bool:
         return bool(self._config.get("use_rag"))
@@ -402,6 +414,7 @@ class Assistant(Agent):
     async def on_user_turn_completed(self, turn_ctx, new_message) -> None:
         try:
             self._user_turn_times.append(time.monotonic())
+            self._last_activity = time.monotonic()
         except Exception:
             pass
         if not self._rag_enabled():
@@ -447,6 +460,7 @@ class Assistant(Agent):
         logger.info(f"[rag] injected context for agent={agent_id}")
 
     async def transcription_node(self, text, model_settings):
+        self._last_activity = time.monotonic()
         chunks: list[str] = []
         output = Agent.default.transcription_node(self, text, model_settings)
         if output is None:
@@ -714,6 +728,21 @@ async def entrypoint(ctx: JobContext):
         ),
         ivr_detection=config["ivr_navigation_enabled"],
     )
+    # ── Actividad del AGENTE: cuando el agente habla (TTS), se marca actividad.
+    # Sin esto, el watchdog cierra llamadas vivas (el agente acaba de hablar
+    # pero el usuario aun no responde). Escuchamos el evento oficial del SDK.
+    def _on_agent_state_changed(state_ev) -> None:
+        try:
+            new_state = getattr(state_ev, "new_state", None)
+            new_state = getattr(new_state, "value", new_state)
+            if str(new_state).lower() == "speaking":
+                agent._last_activity = time.monotonic()
+                logger.debug("[activity] agente hablando -> reset watchdog")
+        except Exception:
+            pass
+
+    session.on("agent_state_changed", _on_agent_state_changed)
+
     shutdown_reason = "session_shutdown"
     billing_termination_started = False
     session_started = False
@@ -925,11 +954,13 @@ async def entrypoint(ctx: JobContext):
                 if activity is not None and getattr(activity, "scheduling_paused", False):
                     continue
                 if elapsed > 20:
-                    turns = getattr(agent, "_user_turn_times", None) or []
-                    last = turns[-1] if turns else started
+                    # Actividad REAL: ultimo momento en que el usuario O el
+                    # agente hablaron. Si el agente acaba de hablar (o esta
+                    # generando), NO se cierra: el cliente esta esperando.
+                    last = float(getattr(agent, "_last_activity", started))
                     if now - last > silence_s:
-                        logger.warning("[WATCHDOG] silencio del cliente ({}s), cerrando llamada", int(now - last))
-                        await _hard_hangup(ctx, session, "silencio_cliente")
+                        logger.warning("[WATCHDOG] silencio total ({}s) sin actividad usuario/agente, cerrando llamada", int(now - last))
+                        await _hard_hangup(ctx, session, "silencio_total")
                         return
         except asyncio.CancelledError:
             pass
