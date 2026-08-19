@@ -716,7 +716,7 @@ async def entrypoint(ctx: JobContext):
             # on_user_turn_completed el SDK invalida esa generacion y NUNCA
             # relanza -> el agente se queda mudo (bug 18-ago). Con OFF genera
             # una sola vez tras cerrar el turno, con el RAG ya inyectado.
-            preemptive_generation=False,
+            preemptive_generation={"enabled": False},  # SDK 1.6.9: dict, NO bool (bool crashea TypeError)
             # Endpointing: espera 1.8s de silencio (max 6s) para dar tiempo
             # a Groq (~0.5-2.4s) a transcribir antes de cerrar el turno.
             endpointing={"min_delay": 0.8, "max_delay": 3.0},
