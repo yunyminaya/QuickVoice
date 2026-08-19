@@ -696,6 +696,13 @@ async def entrypoint(ctx: JobContext):
             # El eco del saludo se descarta (saludo allow_interruptions=False)
             # y el VAD usa 4 threads (rapido).
             turn_detection="vad",
+            # CRITICO preemptive_generation=False: con preemptive ON (default
+            # del SDK), el SDK arranca la generacion del LLM mientras el
+            # usuario aun habla; al inyectar el contexto RAG en
+            # on_user_turn_completed el SDK invalida esa generacion y NUNCA
+            # relanza -> el agente se queda mudo (bug 18-ago). Con OFF genera
+            # una sola vez tras cerrar el turno, con el RAG ya inyectado.
+            preemptive_generation=False,
             # Endpointing: espera 1.8s de silencio (max 6s) para dar tiempo
             # a Groq (~0.5-2.4s) a transcribir antes de cerrar el turno.
             endpointing={"min_delay": 0.8, "max_delay": 3.0},

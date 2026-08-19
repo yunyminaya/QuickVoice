@@ -32,7 +32,7 @@ DEFAULT_CONFIG = {
     "initiation_webhook": None,
     "post_call_webhook": None,
     "variables": None,
-    "preemptive_generation": True,
+    "preemptive_generation": False,
     "ivr_navigation_enabled": True,
     "timezone": "UTC",
     "store_call_audio": True,
