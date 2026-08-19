@@ -143,6 +143,10 @@ def build_agent_tools(config: dict, call_context: dict | None = None) -> list:
 
 def build_agent_instructions(config: dict) -> str:
     instructions = config.get("system_prompt") or DEFAULT_SYSTEM_PROMPT
+    # Cactus local (350M): el prefill crece con el prompt. Truncar a 900 chars
+    # mantiene la esencia (negocio, tono, datos) sin matar la latencia.
+    if len(instructions) > 900:
+        instructions = instructions[:900]
     if config.get("use_rag"):
         instructions += RAG_TOOL_INSTRUCTIONS
     if ivr_navigation_enabled(config):
@@ -433,7 +437,9 @@ class Assistant(Agent):
             return
 
         try:
-            context = await get_rag_context(agent_id=agent_id, query=query)
+            context = await get_rag_context(agent_id=agent_id, query=query, top_k=2)
+            if context and len(context) > 700:
+                context = context[:700]
         except RagRetrievalError:
             # FIX: NO bloquear la respuesta del agente si el RAG falla.
             # Antes este except hacia `return` -> el LLM nunca se llamaba y
