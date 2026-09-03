@@ -1,124 +1,157 @@
-// Provisiona los SIP trunks en LiveKit y actualiza el .env de QuickVoice
-// v3: idempotente - usa trunks existentes si ya estan creados
-import { SipClient } from "livekit-server-sdk";
+// Provisiona el trunk SIP saliente de Twilio para QuickVoice.
+// Idempotente: actualiza el trunk existente y guarda su ID en apps/server/.env.
 import fs from "fs";
+import path from "path";
+import { SipClient } from "livekit-server-sdk";
 
-function loadEnv(path: string): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const line of fs.readFileSync(path, "utf-8").split("\n")) {
-    const l = line.trim();
-    if (!l || l.startsWith("#") || !l.includes("=")) continue;
-    const i = l.indexOf("=");
-    out[l.slice(0, i).trim()] = l.slice(i + 1).trim();
+type Env = Record<string, string>;
+type OutboundTrunk = {
+  sipTrunkId?: string;
+  name?: string;
+  address?: string;
+  numbers?: string[];
+  authUsername?: string;
+};
+
+function loadEnv(filePath: string): Env {
+  const out: Env = {};
+  for (const rawLine of fs.readFileSync(filePath, "utf-8").split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#") || !line.includes("=")) continue;
+    const separator = line.indexOf("=");
+    const key = line.slice(0, separator).trim();
+    const value = line
+      .slice(separator + 1)
+      .trim()
+      .replace(/^("|')(.*)\1$/, "$2");
+    out[key] = value;
   }
   return out;
 }
 
-const lkEnv = loadEnv("/home/yuny/livekit/.env");
-const qvEnvPath = "/home/yuny/QuickVoice/apps/server/.env";
-const qvEnv = loadEnv(qvEnvPath);
+function findQuickVoiceEnv(): string {
+  const candidates = [
+    process.env.QUICKVOICE_ENV_FILE,
+    path.resolve(process.cwd(), "apps/server/.env"),
+    path.resolve(process.cwd(), ".env"),
+    "/home/yuny/QuickVoice/apps/server/.env",
+  ].filter((candidate): candidate is string => Boolean(candidate));
 
-const key = lkEnv.LIVEKIT_API_KEY;
-const secret = lkEnv.LIVEKIT_API_SECRET;
-const host = "http://192.168.1.85:7880";
-const twilioSid = qvEnv.TWILIO_ACCOUNT_SID;
-const twilioToken = qvEnv.TWILIO_AUTH_TOKEN;
-
-const sip = new SipClient(host, key, secret);
-
-function trunkId(resp: any): string {
-  return resp?.sipTrunkId || resp?.sid || "";
+  const envPath = candidates.find((candidate) => fs.existsSync(candidate));
+  if (!envPath) {
+    throw new Error(
+      "No se encontró apps/server/.env. Usa QUICKVOICE_ENV_FILE para indicar el archivo.",
+    );
+  }
+  return envPath;
 }
 
-async function main() {
-  const results: Record<string, string> = {};
-
-  // 1. Inbound trunk - listar existentes primero
-  console.log("Listando trunks existentes...");
-  let inboundId = "";
-  try {
-    const existing = await sip.listSipInboundTrunk();
-    const list = existing?.inboundTrunks || existing?.trunks || existing || [];
-    const arr = Array.isArray(list) ? list : [];
-    const match = arr.find((t: any) => (t.numbers || []).includes("+12296293130"));
-    if (match) {
-      inboundId = trunkId(match);
-      console.log("Inbound trunk YA EXISTE:", inboundId);
-    }
-  } catch (e) {
-    console.log("list inbound:", (e as Error).message.slice(0, 60));
-  }
-  if (!inboundId) {
-    console.log("Creando inbound trunk...");
-    const inbound = await sip.createSipInboundTrunk("quickvoice-inbound", ["+12296293130"], {});
-    inboundId = trunkId(inbound);
-    console.log("Inbound trunk CREADO:", inboundId);
-  }
-  results.inbound = inboundId;
-
-  // 2. Outbound trunk Twilio
-  let outTwilioId = "";
-  try {
-    const existing = await sip.listSipOutboundTrunk();
-    const list = existing?.outboundTrunks || existing?.trunks || existing || [];
-    const arr = Array.isArray(list) ? list : [];
-    const match = arr.find((t: any) => t.name === "quickvoice-outbound-twilio");
-    if (match) {
-      outTwilioId = trunkId(match);
-      console.log("Outbound Twilio YA EXISTE:", outTwilioId);
-    }
-  } catch (e) {
-    console.log("list outbound:", (e as Error).message.slice(0, 60));
-  }
-  if (!outTwilioId) {
-    console.log("Creando outbound trunk Twilio...");
-    const outTwilio = await sip.createSipOutboundTrunk("quickvoice-outbound-twilio", "sip.twilio.com", ["+12296293130"], {
-      auth_username: twilioSid,
-      auth_password: twilioToken,
-    });
-    outTwilioId = trunkId(outTwilio);
-    console.log("Outbound Twilio CREADO:", outTwilioId);
-  }
-  results.outTwilio = outTwilioId;
-
-  // 3. Outbound trunk Telnyx (opcional)
-  let outTelnyxId = "";
-  try {
-    const existing = await sip.listSipOutboundTrunk();
-    const list = existing?.outboundTrunks || existing?.trunks || existing || [];
-    const arr = Array.isArray(list) ? list : [];
-    const match = arr.find((t: any) => t.name === "quickvoice-outbound-telnyx");
-    if (match) {
-      outTelnyxId = trunkId(match);
-    } else {
-      const outTelnyx = await sip.createSipOutboundTrunk("quickvoice-outbound-telnyx", "sip.telnyx.com", ["+12296293130"], {});
-      outTelnyxId = trunkId(outTelnyx);
-      console.log("Outbound Telnyx CREADO:", outTelnyxId);
-    }
-  } catch (e) {
-    console.log("Telnyx skip:", (e as Error).message.slice(0, 60));
-  }
-  results.outTelnyx = outTelnyxId;
-
-  // 4. Actualizar .env
-  let qv = fs.readFileSync(qvEnvPath, "utf-8");
-  const setLine = (k: string, v: string) => {
-    const re = new RegExp(`^${k}=.*$`, "m");
-    const line = `${k}=${v}`;
-    qv = re.test(qv) ? qv.replace(re, line) : qv + "\n" + line;
-  };
-  if (results.inbound) setLine("LIVEKIT_SIP_INBOUND_TRUNK_ID", results.inbound);
-  if (results.outTwilio) setLine("LIVEKIT_SIP_OUTBOUND_TRUNK_TWILIO_ID", results.outTwilio);
-  if (results.outTelnyx) setLine("LIVEKIT_SIP_OUTBOUND_TRUNK_TELNYX_ID", results.outTelnyx);
-  fs.writeFileSync(qvEnvPath, qv);
-  console.log("\n✅ TRUNKS LISTOS:");
-  console.log("  Inbound:", results.inbound);
-  console.log("  Outbound Twilio:", results.outTwilio);
-  console.log("  Outbound Telnyx:", results.outTelnyx || "(opcional)");
-  console.log("  .env actualizado");
+function required(env: Env, key: string): string {
+  const value = env[key]?.trim();
+  if (!value) throw new Error(`Falta ${key} en el .env de QuickVoice`);
+  return value;
 }
 
-main().catch((e) => {
-  console.error("ERROR:", e.message);
+function livekitHttpUrl(value: string | undefined): string {
+  const raw = (value || "ws://127.0.0.1:7880").replace(/\/$/, "");
+  return raw.replace(/^ws(s?):\/\//, "http$1://");
+}
+
+function trunkId(trunk: OutboundTrunk): string {
+  return trunk.sipTrunkId || "";
+}
+
+function outboundList(response: unknown): OutboundTrunk[] {
+  if (Array.isArray(response)) return response as OutboundTrunk[];
+  if (response && typeof response === "object") {
+    const value = response as Record<string, unknown>;
+    for (const key of ["outboundTrunks", "trunks", "items"]) {
+      if (Array.isArray(value[key])) return value[key] as OutboundTrunk[];
+    }
+  }
+  return [];
+}
+
+function setEnvValue(filePath: string, key: string, value: string): void {
+  let content = fs.readFileSync(filePath, "utf-8");
+  const expression = new RegExp(`^${key}=.*$`, "m");
+  const line = `${key}=${value}`;
+  content = expression.test(content)
+    ? content.replace(expression, line)
+    : `${content.trimEnd()}\n${line}\n`;
+  fs.writeFileSync(filePath, content, { mode: 0o600 });
+}
+
+async function main(): Promise<void> {
+  const envPath = findQuickVoiceEnv();
+  const env = loadEnv(envPath);
+  const number = required(env, "LIVEKIT_SIP_OUTBOUND_TWILIO_NUMBER");
+  const address = required(env, "TWILIO_SIP_TERMINATION_URI");
+
+  if (!address.endsWith(".pstn.twilio.com")) {
+    throw new Error(
+      "TWILIO_SIP_TERMINATION_URI debe ser el hostname *.pstn.twilio.com de Twilio",
+    );
+  }
+
+  const sip = new SipClient(
+    livekitHttpUrl(env.LIVEKIT_URL),
+    required(env, "LIVEKIT_API_KEY"),
+    required(env, "LIVEKIT_API_SECRET"),
+  );
+  const configuredId = env.LIVEKIT_SIP_OUTBOUND_TRUNK_TWILIO_ID;
+  const existing = outboundList(await sip.listSipOutboundTrunk());
+  let trunk = configuredId
+    ? existing.find((candidate) => trunkId(candidate) === configuredId)
+    : undefined;
+  trunk ||= existing.find(
+    (candidate) => candidate.name === "quickvoice-outbound-twilio",
+  );
+
+  let id = trunk ? trunkId(trunk) : "";
+  if (trunk && !String(trunk.address || "").endsWith(".pstn.twilio.com")) {
+    throw new Error(
+      `El trunk Twilio existente ${id} no usa un hostname *.pstn.twilio.com; no se modifica`,
+    );
+  }
+
+  if (!trunk) {
+    const username = required(env, "TWILIO_SIP_USERNAME");
+    const password = required(env, "TWILIO_SIP_PASSWORD");
+    const created = await sip.createSipOutboundTrunk(
+      "quickvoice-outbound-twilio",
+      address,
+      [number],
+      { auth_username: username, auth_password: password },
+    );
+    id = trunkId(created);
+    if (!id) throw new Error("LiveKit no devolvió el ID del trunk creado");
+  } else {
+    await sip.updateSipOutboundTrunkFields(id, { numbers: { set: [number] } });
+  }
+
+  const verified = outboundList(await sip.listSipOutboundTrunk()).find(
+    (candidate) => trunkId(candidate) === id,
+  );
+  if (!verified || !(verified.numbers || []).includes(number)) {
+    throw new Error("No se pudo verificar el número en el trunk Twilio");
+  }
+  if (!String(verified.address || "").endsWith(".pstn.twilio.com")) {
+    throw new Error("No se pudo verificar la dirección PSTN de Twilio");
+  }
+
+  setEnvValue(envPath, "LIVEKIT_SIP_OUTBOUND_TRUNK_TWILIO_ID", id);
+  console.log("✅ Trunk saliente Twilio listo");
+  console.log(`   ID: ${id}`);
+  console.log(`   Dirección PSTN: ${verified.address}`);
+  console.log("   Número configurado: sí");
+  console.log(`   Archivo actualizado: ${envPath}`);
+}
+
+main().catch((error: unknown) => {
+  console.error(
+    "ERROR:",
+    error instanceof Error ? error.message : String(error),
+  );
   process.exit(1);
 });
